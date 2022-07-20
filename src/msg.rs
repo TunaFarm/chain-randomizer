@@ -1,19 +1,15 @@
-use cosmwasm_std::{Binary, Coin};
+use cosmwasm_std::Binary;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
     pub pubkey: Binary,
-    /// The denom in which bounties are paid. This is typically the fee token of the chain.
-    pub bounty_denom: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    /// Sets a bounty as sent in sent_funds on the given round.
-    SetBounty { round: u64 },
     Add {
         round: u64,
         previous_signature: Binary,
@@ -27,13 +23,11 @@ pub enum QueryMsg {
     Config {},
     Get { round: u64 },
     Latest {},
-    Bounties {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct ConfigResponse {
     pub pubkey: Binary,
-    pub bounty_denom: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -46,15 +40,4 @@ pub struct GetResponse {
 pub struct LatestResponse {
     pub round: u64,
     pub randomness: Binary,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct Bounty {
-    pub round: u64,
-    pub amount: Vec<Coin>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct BountiesResponse {
-    pub bounties: Vec<Bounty>,
 }

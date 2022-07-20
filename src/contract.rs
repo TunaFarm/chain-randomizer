@@ -1,19 +1,12 @@
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{
-    coins, to_binary, BankMsg, Binary, Deps, DepsMut, Env, MessageInfo, Order, Response, StdResult,
-    Storage, SubMsg,
-};
+use cosmwasm_std::{to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Response, Storage};
 use drand_verify::{derive_randomness, g1_from_variable, verify};
 
 use crate::errors::ContractError;
 use crate::msg::{
-    BountiesResponse, Bounty, ConfigResponse, ExecuteMsg, GetResponse, InstantiateMsg,
-    LatestResponse, QueryMsg,
+    ConfigResponse, ExecuteMsg, GetResponse, InstantiateMsg, LatestResponse, QueryMsg,
 };
-use crate::state::{
-    beacons_storage, beacons_storage_read, bounties_storage, bounties_storage_read, config,
-    config_read, Config,
-};
+use crate::state::{beacons_storage, beacons_storage_read, config, config_read, Config};
 
 use cw2::set_contract_version;
 
@@ -28,10 +21,7 @@ pub fn instantiate(
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    config(deps.storage).save(&Config {
-        pubkey: msg.pubkey,
-        bounty_denom: msg.bounty_denom,
-    })?;
+    config(deps.storage).save(&Config { pubkey: msg.pubkey })?;
     Ok(Response::default())
 }
 
@@ -43,7 +33,6 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::SetBounty { round } => try_set_bounty(deps, info, round),
         ExecuteMsg::Add {
             round,
             previous_signature,
@@ -52,43 +41,15 @@ pub fn execute(
     }
 }
 
-pub fn try_set_bounty(
-    deps: DepsMut,
-    info: MessageInfo,
-    round: u64,
-) -> Result<Response, ContractError> {
-    let denom = config_read(deps.storage).load()?.bounty_denom;
-
-    let matching_coin = info.funds.iter().find(|fund| fund.denom == denom);
-    let sent_amount: u128 = match matching_coin {
-        Some(coin) => coin.amount.into(),
-        None => {
-            return Err(ContractError::NoFundsSent {
-                expected_denom: denom,
-            });
-        }
-    };
-
-    let current = get_bounty(deps.storage, round)?;
-    let new_value = current + sent_amount;
-    set_bounty(deps.storage, round, new_value);
-
-    Ok(Response::new().add_attribute("bounty", new_value.to_string()))
-}
-
 pub fn try_add(
     deps: DepsMut,
     _env: Env,
-    info: MessageInfo,
+    _info: MessageInfo,
     round: u64,
     previous_signature: Binary,
     signature: Binary,
 ) -> Result<Response, ContractError> {
-    let Config {
-        pubkey,
-        bounty_denom,
-        ..
-    } = config_read(deps.storage).load()?;
+    let Config { pubkey, .. } = config_read(deps.storage).load()?;
     let pk = g1_from_variable(&pubkey).map_err(|_| ContractError::InvalidPubkey {})?;
     let valid = verify(
         &pk,
@@ -105,21 +66,7 @@ pub fn try_add(
     let randomness = derive_randomness(&signature);
     beacons_storage(deps.storage).set(&round.to_be_bytes(), &randomness);
 
-    let bounty = get_bounty(deps.storage, round)?;
-
-    let mut messages: Vec<SubMsg> = vec![];
-    if bounty != 0 {
-        let msg = BankMsg::Send {
-            to_address: info.sender.to_string(),
-            amount: coins(bounty, bounty_denom),
-        };
-        messages.push(SubMsg::new(msg));
-        clear_bounty(deps.storage, round);
-    }
-
-    Ok(Response::new()
-        .add_attribute("randomness", Binary::from(randomness).to_base64())
-        .add_submessages(messages))
+    Ok(Response::new().add_attribute("randomness", Binary::from(randomness).to_base64()))
 }
 
 #[entry_point]
@@ -128,7 +75,6 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> Result<Binary, ContractErr
         QueryMsg::Config {} => to_binary(&query_config(deps)?)?,
         QueryMsg::Get { round } => to_binary(&query_get(deps, round)?)?,
         QueryMsg::Latest {} => to_binary(&query_latest(deps)?)?,
-        QueryMsg::Bounties {} => to_binary(&query_bounties(deps)?)?,
     };
     Ok(response)
 }
@@ -137,7 +83,6 @@ fn query_config(deps: Deps) -> Result<ConfigResponse, ContractError> {
     let config = config_read(deps.storage).load()?;
     Ok(ConfigResponse {
         pubkey: config.pubkey,
-        bounty_denom: config.bounty_denom,
     })
 }
 
@@ -160,55 +105,11 @@ fn query_latest(deps: Deps) -> Result<LatestResponse, ContractError> {
     })
 }
 
-fn query_bounties(deps: Deps) -> Result<BountiesResponse, ContractError> {
-    let Config { bounty_denom, .. } = config_read(deps.storage).load()?;
-
-    let store = bounties_storage_read(deps.storage);
-    let iter = store.range(None, None, Order::Ascending);
-
-    let bounties: Result<Vec<Bounty>, _> = iter
-        .map(|(key, value)| -> StdResult<Bounty> {
-            let round = u64::from_be_bytes(Binary(key).to_array()?);
-            let amount = coins(
-                u128::from_be_bytes(Binary(value).to_array()?),
-                &bounty_denom,
-            );
-            Ok(Bounty { round, amount })
-        })
-        .collect();
-
-    Ok(BountiesResponse {
-        bounties: bounties?,
-    })
-}
-
-fn get_bounty(storage: &dyn Storage, round: u64) -> StdResult<u128> {
-    let key = round.to_be_bytes();
-    let bounties = bounties_storage_read(storage);
-    let value = match bounties.get(&key) {
-        Some(data) => u128::from_be_bytes(Binary(data).to_array()?),
-        None => 0u128,
-    };
-    Ok(value)
-}
-
-fn set_bounty(storage: &mut dyn Storage, round: u64, amount: u128) {
-    let key = round.to_be_bytes();
-    let mut bounties = bounties_storage(storage);
-    bounties.set(&key, &amount.to_be_bytes());
-}
-
-fn clear_bounty(storage: &mut dyn Storage, round: u64) {
-    let key = round.to_be_bytes();
-    let mut bounties = bounties_storage(storage);
-    bounties.remove(&key);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{from_binary, Addr, Coin, Uint128};
+    use cosmwasm_std::{coins, from_binary};
 
     // $ node
     // > Uint8Array.from(Buffer.from("868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784a9402801af31", "hex"))
@@ -221,8 +122,6 @@ mod tests {
         .into()
     }
 
-    const BOUNTY_DENOM: &str = "ucosm";
-
     #[test]
     fn proper_initialization() {
         let mut deps = mock_dependencies();
@@ -230,7 +129,6 @@ mod tests {
         let info = mock_info("creator", &coins(1000, "earth"));
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
 
         let res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -242,67 +140,6 @@ mod tests {
             response,
             ConfigResponse {
                 pubkey: pubkey_loe_mainnet(),
-                bounty_denom: BOUNTY_DENOM.into(),
-            }
-        );
-    }
-
-    #[test]
-    fn set_bounty_works() {
-        let mut deps = mock_dependencies();
-
-        let info = mock_info("creator", &[]);
-        let msg = InstantiateMsg {
-            pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
-        };
-        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // First bounty
-
-        let msg = ExecuteMsg::SetBounty { round: 7000 };
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: BOUNTY_DENOM.into(),
-                amount: Uint128::new(5000),
-            }],
-        );
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        let response: BountiesResponse =
-            from_binary(&query(deps.as_ref(), mock_env(), QueryMsg::Bounties {}).unwrap()).unwrap();
-        assert_eq!(
-            response,
-            BountiesResponse {
-                bounties: vec![Bounty {
-                    round: 7000,
-                    amount: coins(5000, BOUNTY_DENOM),
-                }]
-            }
-        );
-
-        // Increase bounty
-
-        let msg = ExecuteMsg::SetBounty { round: 7000 };
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: BOUNTY_DENOM.into(),
-                amount: Uint128::new(24),
-            }],
-        );
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-        let response: BountiesResponse =
-            from_binary(&query(deps.as_ref(), mock_env(), QueryMsg::Bounties {}).unwrap()).unwrap();
-
-        assert_eq!(
-            response,
-            BountiesResponse {
-                bounties: vec![Bounty {
-                    round: 7000,
-                    amount: coins(5024, BOUNTY_DENOM),
-                }]
             }
         );
     }
@@ -314,7 +151,6 @@ mod tests {
         let info = mock_info("creator", &[]);
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -346,7 +182,6 @@ mod tests {
         broken.push(0xF9);
         let msg = InstantiateMsg {
             pubkey: broken.into(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -371,7 +206,6 @@ mod tests {
         let info = mock_info("creator", &[]);
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -396,7 +230,6 @@ mod tests {
         let info = mock_info("creator", &[]);
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -415,68 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn add_receives_bounty() {
-        let mut deps = mock_dependencies();
-
-        let info = mock_info("creator", &[]);
-        let msg = InstantiateMsg {
-            pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
-        };
-        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // Set bounty
-
-        let msg = ExecuteMsg::SetBounty { round: 72785 };
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: BOUNTY_DENOM.into(),
-                amount: Uint128::new(4500),
-            }],
-        );
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // Claim bounty
-
-        let info = mock_info("claimer", &[]);
-        let msg = ExecuteMsg::Add {
-            // curl -sS https://drand.cloudflare.com/public/72785
-            round: 72785,
-            previous_signature: hex::decode("a609e19a03c2fcc559e8dae14900aaefe517cb55c840f6e69bc8e4f66c8d18e8a609685d9917efbfb0c37f058c2de88f13d297c7e19e0ab24813079efe57a182554ff054c7638153f9b26a60e7111f71a0ff63d9571704905d3ca6df0b031747").unwrap().into(),
-            signature: hex::decode("82f5d3d2de4db19d40a6980e8aa37842a0e55d1df06bd68bddc8d60002e8e959eb9cfa368b3c1b77d18f02a54fe047b80f0989315f83b12a74fd8679c4f12aae86eaf6ab5690b34f1fddd50ee3cc6f6cdf59e95526d5a5d82aaa84fa6f181e42").unwrap().into(),
-        };
-        let response = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-        assert_eq!(response.messages.len(), 1);
-        assert_eq!(
-            response.messages[0],
-            SubMsg::new(BankMsg::Send {
-                to_address: Addr::unchecked("claimer").to_string(),
-                amount: coins(4500, BOUNTY_DENOM),
-            })
-        );
-
-        // Cannot be claimed again
-
-        let info = mock_info("claimer2", &[]);
-        let msg = ExecuteMsg::Add {
-            // curl -sS https://drand.cloudflare.com/public/72785
-            round: 72785,
-            previous_signature: hex::decode("a609e19a03c2fcc559e8dae14900aaefe517cb55c840f6e69bc8e4f66c8d18e8a609685d9917efbfb0c37f058c2de88f13d297c7e19e0ab24813079efe57a182554ff054c7638153f9b26a60e7111f71a0ff63d9571704905d3ca6df0b031747").unwrap().into(),
-            signature: hex::decode("82f5d3d2de4db19d40a6980e8aa37842a0e55d1df06bd68bddc8d60002e8e959eb9cfa368b3c1b77d18f02a54fe047b80f0989315f83b12a74fd8679c4f12aae86eaf6ab5690b34f1fddd50ee3cc6f6cdf59e95526d5a5d82aaa84fa6f181e42").unwrap().into(),
-        };
-        let response = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-        assert_eq!(response.messages.len(), 0);
-    }
-
-    #[test]
     fn query_get_works() {
         let mut deps = mock_dependencies();
 
         let info = mock_info("creator", &[]);
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -514,7 +291,6 @@ mod tests {
         let info = mock_info("creator", &[]);
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -532,7 +308,6 @@ mod tests {
         let info = mock_info("creator", &[]);
         let msg = InstantiateMsg {
             pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
         };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -591,112 +366,6 @@ mod tests {
             latest.randomness,
             hex::decode("bfef28c6f445af5eedcf9de596a0bdd95b7e285aedefd17d70e1fac668c5f05b")
                 .unwrap()
-        );
-    }
-
-    #[test]
-    fn query_bounties_works() {
-        let mut deps = mock_dependencies();
-
-        let info = mock_info("creator", &[]);
-        let msg = InstantiateMsg {
-            pubkey: pubkey_loe_mainnet(),
-            bounty_denom: BOUNTY_DENOM.into(),
-        };
-        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // It starts with an empty list
-
-        let response: BountiesResponse =
-            from_binary(&query(deps.as_ref(), mock_env(), QueryMsg::Bounties {}).unwrap()).unwrap();
-        assert_eq!(response, BountiesResponse { bounties: vec![] });
-
-        // Set first bounty and query again
-
-        let msg = ExecuteMsg::SetBounty { round: 72785 };
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: BOUNTY_DENOM.into(),
-                amount: Uint128::new(4500),
-            }],
-        );
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        let response: BountiesResponse =
-            from_binary(&query(deps.as_ref(), mock_env(), QueryMsg::Bounties {}).unwrap()).unwrap();
-        assert_eq!(
-            response,
-            BountiesResponse {
-                bounties: vec![Bounty {
-                    round: 72785,
-                    amount: coins(4500, BOUNTY_DENOM),
-                }]
-            }
-        );
-
-        // Set second bounty and query again
-
-        let msg = ExecuteMsg::SetBounty { round: 72786 };
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: BOUNTY_DENOM.into(),
-                amount: Uint128::new(321),
-            }],
-        );
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        let response: BountiesResponse =
-            from_binary(&query(deps.as_ref(), mock_env(), QueryMsg::Bounties {}).unwrap()).unwrap();
-        assert_eq!(
-            response,
-            BountiesResponse {
-                bounties: vec![
-                    Bounty {
-                        round: 72785,
-                        amount: coins(4500, BOUNTY_DENOM),
-                    },
-                    Bounty {
-                        round: 72786,
-                        amount: coins(321, BOUNTY_DENOM),
-                    },
-                ]
-            }
-        );
-
-        // Set third bounty and query again
-
-        let msg = ExecuteMsg::SetBounty { round: 72784 };
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: BOUNTY_DENOM.into(),
-                amount: Uint128::new(55),
-            }],
-        );
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        let response: BountiesResponse =
-            from_binary(&query(deps.as_ref(), mock_env(), QueryMsg::Bounties {}).unwrap()).unwrap();
-        assert_eq!(
-            response,
-            BountiesResponse {
-                bounties: vec![
-                    Bounty {
-                        round: 72784,
-                        amount: coins(55, BOUNTY_DENOM),
-                    },
-                    Bounty {
-                        round: 72785,
-                        amount: coins(4500, BOUNTY_DENOM),
-                    },
-                    Bounty {
-                        round: 72786,
-                        amount: coins(321, BOUNTY_DENOM),
-                    },
-                ]
-            }
         );
     }
 }

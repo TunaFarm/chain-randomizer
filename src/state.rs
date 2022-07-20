@@ -9,12 +9,10 @@ use cosmwasm_storage::{
 
 const CONFIG_KEY: &[u8] = b"config";
 const BEACONS_KEY: &[u8] = b"beacons";
-const BOUNTIES_KEY: &[u8] = b"bounties";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Config {
     pub pubkey: Binary,
-    pub bounty_denom: String,
 }
 
 pub fn config(storage: &mut dyn Storage) -> Singleton<Config> {
@@ -31,12 +29,4 @@ pub fn beacons_storage(storage: &mut dyn Storage) -> PrefixedStorage {
 
 pub fn beacons_storage_read(storage: &dyn Storage) -> ReadonlyPrefixedStorage {
     prefixed_read(storage, BEACONS_KEY)
-}
-
-pub fn bounties_storage(storage: &mut dyn Storage) -> PrefixedStorage {
-    prefixed(storage, BOUNTIES_KEY)
-}
-
-pub fn bounties_storage_read(storage: &dyn Storage) -> ReadonlyPrefixedStorage {
-    prefixed_read(storage, BOUNTIES_KEY)
 }
